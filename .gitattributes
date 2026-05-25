@@ -1,3 +1,5 @@
-spectrum_analyzer.html linguist-detectable=false
+*.html linguist-detectable=false
+*.md linguist-detectable=false
+*.txt linguist-detectable=false
 *.py linguist-detectable=true
 *.sh linguist-detectable=true
