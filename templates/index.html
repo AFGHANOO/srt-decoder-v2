@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SRT Decoder — Raspberry Pi 4</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
+<script src="https://cdn.socket.io/4.6.0/socket.io.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root{--bg:#080c10;--surface:#0d1117;--card:#111820;--border:#1e2d3d;--acc:#00e5ff;--grn:#39ff14;--red:#ff2d55;--ylw:#ffd60a;--txt:#c9d5e0;--mut:#4a6070;--mono:'JetBrains Mono',monospace;--sans:'Syne',sans-serif}
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;width:100%;overflow:hidden}
+  body{background:var(--bg);color:var(--txt);font-family:var(--sans);display:flex;flex-direction:column}
+  body::before{content:'';position:fixed;inset:0;background-image:repeating-linear-gradient(0deg,transparent,transparent 39px,rgba(0,229,255,0.02) 39px,rgba(0,229,255,0.02) 40px),repeating-linear-gradient(90deg,transparent,transparent 39px,rgba(0,229,255,0.02) 39px,rgba(0,229,255,0.02) 40px);pointer-events:none;z-index:0}
+
+  header{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:9px 22px;border-bottom:1px solid var(--border);background:rgba(13,17,23,0.95);backdrop-filter:blur(12px);z-index:100;position:relative}
+  .logo{display:flex;align-items:center;gap:10px}
+  .logo-icon{width:28px;height:28px;border:1.5px solid var(--acc);border-radius:6px;display:grid;place-items:center;background:rgba(0,229,255,0.08);box-shadow:0 0 10px rgba(0,229,255,.2);font-size:14px}
+  .logo-text{font-weight:800;font-size:.9rem;letter-spacing:.05em}
+  .logo-sub{font-family:var(--mono);font-size:.55rem;color:var(--mut);letter-spacing:.12em}
+  .header-right{display:flex;align-items:center;gap:10px}
+  .pill{font-family:var(--mono);font-size:.65rem;padding:3px 10px;border-radius:100px;border:1px solid;letter-spacing:.08em;display:flex;align-items:center;gap:5px}
+  .pill.idle{border-color:var(--mut);color:var(--mut)}
+  .pill.running{border-color:var(--grn);color:var(--grn);box-shadow:0 0 8px rgba(57,255,20,.2)}
+  .pill.error{border-color:var(--red);color:var(--red)}
+  .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+  .dot.pulse{animation:pulse 1.4s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+
+  main{flex:1;overflow:hidden;position:relative;z-index:1;display:flex}
+
+  /* ── Root grid: left config panel | right content ── */
+  .dashboard{
+    display:grid;
+    grid-template-columns:272px 1fr;
+    gap:10px;
+    padding:10px 16px;
+    width:100%;
+    height:100%;
+  }
+
+  /* Left config column */
+  .panel-left{display:flex;flex-direction:column;gap:8px;overflow-y:auto;scrollbar-width:none}
+  .panel-left::-webkit-scrollbar{display:none}
+
+  /* Right content column — split into top and bottom */
+  .panel-right{
+    display:grid;
+    grid-template-rows:auto auto 1fr;
+    gap:10px;
+    min-height:0;
+  }
+
+  /* Video + sidebar row */
+  .video-row{
+    display:grid;
+    grid-template-columns:1fr 280px;
+    gap:10px;
+  }
+
+  /* Stats row */
+  .stats-row{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:10px;
+  }
+
+  /* Bottom row: bitrate chart + log side by side */
+  .bottom-row{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:10px;
+    min-height:0;
+  }
+
+  /* Cards */
+  .card{background:var(--card);border:1px solid var(--border);border-radius:11px;padding:12px;position:relative;overflow:hidden}
+  .card::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,rgba(0,229,255,0.025) 0%,transparent 60%);pointer-events:none}
+  .card-title{font-family:var(--mono);font-size:.6rem;letter-spacing:.14em;color:var(--mut);text-transform:uppercase;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;gap:6px}
+  .card-title-left{display:flex;align-items:center;gap:6px}
+  .card-title-left::before{content:'//';color:var(--acc);opacity:.55}
+
+  /* Mode toggle */
+  .mode-toggle{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:5px}
+  .mode-btn{padding:7px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--mut);font-family:var(--mono);font-size:.7rem;cursor:pointer;transition:all .2s;text-align:center}
+  .mode-btn.active{border-color:var(--acc);color:var(--acc);background:rgba(0,229,255,0.08)}
+  .mode-btn:hover:not(.active){border-color:var(--txt);color:var(--txt)}
+  .mode-btn:disabled{opacity:.35;cursor:not-allowed}
+
+  .field{margin-bottom:8px}
+  .field label{display:block;font-family:var(--mono);font-size:.6rem;color:var(--mut);letter-spacing:.1em;margin-bottom:4px}
+  .field input,.field select{width:100%;background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:6px;color:var(--txt);font-family:var(--mono);font-size:.8rem;padding:6px 10px;outline:none;transition:border-color .2s}
+  .field input:focus,.field select:focus{border-color:var(--acc)}
+  .field input:disabled,.field select:disabled{opacity:.4;cursor:not-allowed}
+  .field input[type="password"]{letter-spacing:.15em}
+  .field input::placeholder{color:var(--mut);letter-spacing:0}
+  .field select option{background:#111820}
+  .range-row{display:flex;align-items:center;gap:8px}
+  .range-row input[type="range"]{flex:1;background:transparent;padding:0;border:none;box-shadow:none;-webkit-appearance:none}
+  input[type="range"]::-webkit-slider-runnable-track{height:3px;border-radius:2px;background:linear-gradient(to right,var(--acc) var(--val,0%),var(--border) var(--val,0%))}
+  input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--acc);margin-top:-5px;cursor:pointer}
+  .range-val{font-family:var(--mono);font-size:.75rem;color:var(--acc);min-width:46px;text-align:right}
+
+  /* HDMI */
+  .hdmi-toggle-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .hdmi-toggle-label{font-family:var(--mono);font-size:.75rem;color:var(--txt)}
+  .toggle-switch{position:relative;width:38px;height:20px;cursor:pointer}
+  .toggle-switch input{opacity:0;width:0;height:0;position:absolute}
+  .toggle-track{position:absolute;inset:0;background:var(--border);border-radius:10px;transition:background .25s}
+  .toggle-switch input:checked + .toggle-track{background:var(--acc)}
+  .toggle-thumb{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .25s}
+  .toggle-switch input:checked ~ .toggle-thumb{transform:translateX(18px)}
+  .hdmi-status-badge{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:.62rem;padding:2px 8px;border-radius:5px;border:1px solid}
+  .hdmi-status-badge.off{border-color:var(--mut);color:var(--mut)}
+  .hdmi-status-badge.active{border-color:var(--grn);color:var(--grn)}
+  .hdmi-status-badge.error{border-color:var(--red);color:var(--red)}
+  .hdmi-btn-row{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}
+  .btn-sm{padding:6px;border-radius:6px;border:none;cursor:pointer;font-family:var(--mono);font-size:.68rem;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:4px}
+  .btn-sm:disabled{opacity:.35;cursor:not-allowed}
+  .btn-hdmi-on{background:rgba(0,229,255,.1);border:1px solid var(--acc);color:var(--acc)}
+  .btn-hdmi-on:hover:not(:disabled){background:rgba(0,229,255,.2)}
+  .btn-hdmi-off{background:rgba(255,45,85,.08);border:1px solid var(--red);color:var(--red)}
+  .btn-hdmi-off:hover:not(:disabled){background:rgba(255,45,85,.18)}
+
+  .btn{width:100%;padding:10px;border-radius:8px;border:none;cursor:pointer;font-family:var(--sans);font-weight:600;font-size:.85rem;letter-spacing:.05em;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:6px}
+  .btn-start{background:linear-gradient(135deg,var(--grn),#00c800);color:#000;box-shadow:0 3px 14px rgba(57,255,20,.25)}
+  .btn-start:hover:not(:disabled){transform:translateY(-1px)}
+  .btn-stop{background:linear-gradient(135deg,var(--red),#cc0033);color:#fff;box-shadow:0 3px 14px rgba(255,45,85,.25)}
+  .btn-stop:hover:not(:disabled){transform:translateY(-1px)}
+  .btn:disabled{opacity:.4;cursor:not-allowed;transform:none!important}
+
+  .srt-url-box{background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;padding:7px 28px 7px 10px;font-family:var(--mono);font-size:.63rem;color:var(--acc);word-break:break-all;cursor:pointer;position:relative}
+  .srt-url-box:hover{border-color:var(--acc)}
+  .copy-hint{position:absolute;right:7px;top:50%;transform:translateY(-50%);font-size:.58rem;color:var(--mut)}
+
+  /* Video */
+  .video-wrap{position:relative;background:#000;border-radius:10px;overflow:hidden;width:100%;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center}
+  video{width:100%;height:100%;object-fit:contain;display:block}
+  .video-overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(8,12,16,.88);transition:opacity .4s}
+  .video-overlay.hidden{opacity:0;pointer-events:none}
+  .video-overlay-icon{font-size:2rem;margin-bottom:8px}
+  .video-overlay-text{font-family:var(--mono);font-size:.75rem;color:var(--mut)}
+  .video-badge{position:absolute;top:10px;left:10px;background:rgba(255,45,85,.9);color:#fff;font-family:var(--mono);font-size:.6rem;font-weight:700;padding:2px 8px;border-radius:3px;display:flex;align-items:center;gap:4px;opacity:0;transition:opacity .3s}
+  .video-badge.visible{opacity:1}
+  .hdmi-badge{position:absolute;top:10px;right:10px;background:rgba(0,229,255,.12);border:1px solid var(--acc);color:var(--acc);font-family:var(--mono);font-size:.6rem;padding:2px 8px;border-radius:3px;display:flex;align-items:center;gap:4px;opacity:0;transition:opacity .3s}
+  .hdmi-badge.visible{opacity:1}
+
+  /* Video sidebar: bitrate chart + log stacked */
+  .video-sidebar{display:flex;flex-direction:column;gap:10px;min-height:0}
+  .video-sidebar .card{flex:1;display:flex;flex-direction:column;min-height:0}
+  .chart-wrap{flex:1;min-height:0;position:relative}
+  .log-wrap{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border) transparent;min-height:0}
+
+  /* Stats */
+  .stat-tile{text-align:center;padding:8px 4px}
+  .stat-val{font-family:var(--mono);font-size:1.4rem;font-weight:700;color:var(--acc);line-height:1;margin-bottom:3px;transition:color .3s}
+  .stat-unit{font-family:var(--mono);font-size:.6rem;color:var(--mut)}
+  .stat-label{font-family:var(--mono);font-size:.6rem;color:var(--mut);margin-top:3px;letter-spacing:.08em}
+  .stat-val.warn{color:var(--ylw)}
+  .stat-val.bad{color:var(--red)}
+
+  .log-line{display:flex;gap:8px;font-family:var(--mono);font-size:.67rem;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.025);animation:fadeIn .3s ease}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(3px)}to{opacity:1}}
+  .log-time{color:var(--mut);flex-shrink:0}
+  .log-level{flex-shrink:0;width:40px}
+  .log-level.info{color:var(--acc)}
+  .log-level.warn{color:var(--ylw)}
+  .log-level.error{color:var(--red)}
+  .log-msg{color:var(--txt);word-break:break-all}
+
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">
+    <div class="logo-icon">📡</div>
+    <div>
+      <div class="logo-text">SRT DECODER</div>
+      <div class="logo-sub">Raspberry Pi 4 // Dashboard</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="pill idle" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusText">IDLE</span></div>
+    <div class="pill idle" style="border-color:var(--border);color:var(--mut)"><span id="uptimeDisplay">00:00:00</span></div>
+  </div>
+</header>
+
+<main>
+<div class="dashboard">
+
+  <!-- ── Left config panel ── -->
+  <aside class="panel-left">
+    <div class="card">
+      <div class="card-title"><span class="card-title-left">Connection Mode</span></div>
+      <div class="mode-toggle">
+        <button class="mode-btn active" id="btnListener" onclick="setMode('listener')">⬇ LISTENER</button>
+        <button class="mode-btn" id="btnCaller" onclick="setMode('caller')">⬆ CALLER</button>
+      </div>
+      <p style="font-family:var(--mono);font-size:.6rem;color:var(--mut);margin-top:5px" id="modeDesc">Waits for incoming SRT connection.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="card-title-left">Network</span></div>
+      <div class="field" id="hostField" style="opacity:.4">
+        <label>Target Host (caller)</label>
+        <input type="text" id="inpHost" placeholder="192.168.1.100" value="192.168.1.100">
+      </div>
+      <div class="field">
+        <label>Port</label>
+        <input type="number" id="inpPort" value="1935" min="1024" max="65535">
+      </div>
+      <div class="field">
+        <label>Latency</label>
+        <div class="range-row">
+          <input type="range" id="inpLatency" min="20" max="8000" step="10" value="200" oninput="updateLatency(this.value)">
+          <span class="range-val" id="latencyVal">200 ms</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="card-title-left">Encryption</span></div>
+      <div class="field">
+        <label>Passphrase (blank = off)</label>
+        <input type="password" id="inpPassphrase" placeholder="10 to 79 characters" autocomplete="off">
+      </div>
+      <p style="font-family:var(--mono);font-size:.6rem;color:var(--mut)">AES-128 when set.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="card-title-left">HDMI Output</span></div>
+      <div class="hdmi-toggle-row">
+        <span class="hdmi-toggle-label">Enable on Start</span>
+        <label class="toggle-switch">
+          <input type="checkbox" id="hdmiToggle" onchange="toggleHdmi(this.checked)">
+          <span class="toggle-track"></span>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
+      <div class="field">
+        <label>Player</label>
+        <select id="hdmiPlayer">
+          <option value="ffplay">ffplay (always available)</option>
+          <option value="mpv">mpv (GPU, low latency)</option>
+          <option value="vlc">VLC (cvlc)</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <span style="font-family:var(--mono);font-size:.6rem;color:var(--mut)">Status</span>
+        <span class="hdmi-status-badge off" id="hdmiStatusBadge"><span class="dot" id="hdmiDot"></span><span id="hdmiStatusText">OFF</span></span>
+      </div>
+      <div class="hdmi-btn-row">
+        <button class="btn-sm btn-hdmi-on" id="btnHdmiOn" onclick="hdmiStart()" disabled>▶ HDMI ON</button>
+        <button class="btn-sm btn-hdmi-off" id="btnHdmiOff" onclick="hdmiStop()" disabled>■ HDMI OFF</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="card-title-left">Controls</span></div>
+      <button class="btn btn-start" id="btnStart" onclick="startStream()">▶ START DECODER</button>
+      <div style="height:7px"></div>
+      <button class="btn btn-stop" id="btnStop" onclick="stopStream()" disabled>■ STOP</button>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="card-title-left">SRT URL</span></div>
+      <div class="srt-url-box" onclick="copySrtUrl()">
+        <span id="srtUrlText" style="color:var(--mut)">Not running</span>
+        <span class="copy-hint">copy</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── Right content panel ── -->
+  <div class="panel-right">
+
+    <!-- Row 1: Video preview + sidebar (chart + log) -->
+    <div class="video-row">
+      <!-- Video -->
+      <div class="card" style="padding:0;overflow:hidden">
+        <div class="video-wrap" id="videoWrap">
+          <video id="videoEl" controls muted playsinline></video>
+          <div class="video-overlay" id="videoOverlay">
+            <div class="video-overlay-icon">📺</div>
+            <div class="video-overlay-text">Stream not active</div>
+          </div>
+          <div class="video-badge" id="liveBadge"><span class="dot pulse"></span> LIVE</div>
+          <div class="hdmi-badge" id="hdmiBadge">🖥 HDMI</div>
+        </div>
+      </div>
+
+      <!-- Sidebar: Bitrate chart + Log -->
+      <div class="video-sidebar">
+        <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:0">
+          <div class="card-title"><span class="card-title-left">Bitrate History</span></div>
+          <div class="chart-wrap"><canvas id="bitrateChart"></canvas></div>
+        </div>
+        <div class="card" style="flex:2;display:flex;flex-direction:column;min-height:0">
+          <div class="card-title">
+            <span class="card-title-left">System Log</span>
+            <button onclick="clearLog()" style="background:none;border:1px solid var(--border);color:var(--mut);font-family:var(--mono);font-size:.58rem;padding:1px 7px;border-radius:4px;cursor:pointer">CLEAR</button>
+          </div>
+          <div class="log-wrap" id="logWrap"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 2: 4 stat tiles -->
+    <div class="stats-row">
+      <div class="card stat-tile"><div class="stat-val" id="statBitrate">—</div><div class="stat-unit">kbps</div><div class="stat-label">Bitrate</div></div>
+      <div class="card stat-tile"><div class="stat-val" id="statRtt">—</div><div class="stat-unit">ms</div><div class="stat-label">RTT</div></div>
+      <div class="card stat-tile"><div class="stat-val" id="statLost">—</div><div class="stat-unit">pkts</div><div class="stat-label">Pkt Lost</div></div>
+      <div class="card stat-tile"><div class="stat-val" id="statBytes">—</div><div class="stat-unit">MB</div><div class="stat-label">Received</div></div>
+    </div>
+
+  </div><!-- /panel-right -->
+
+</div><!-- /dashboard -->
+</main>
+
+<!-- Signature -->
+
+<script>
+const socket=io();
+let currentMode='listener',isRunning=false,hdmiEnabled=false,uptimeInterval=null,startedAt=null,hlsInstance=null;
+const el=id=>document.getElementById(id);
+
+const bitrateChart=new Chart(el('bitrateChart'),{type:'line',data:{labels:[],datasets:[{data:[],borderColor:'#00e5ff',backgroundColor:'rgba(0,229,255,.07)',borderWidth:1.5,pointRadius:0,tension:0.4,fill:true}]},options:{responsive:true,maintainAspectRatio:false,animation:false,scales:{x:{display:false},y:{display:true,position:'right',grid:{color:'rgba(255,255,255,.04)'},ticks:{color:'#4a6070',font:{family:'JetBrains Mono',size:9},maxTicksLimit:3}}},plugins:{legend:{display:false},tooltip:{enabled:false}}}});
+
+function pushBr(v){bitrateChart.data.labels.push('');bitrateChart.data.datasets[0].data.push(v);if(bitrateChart.data.labels.length>60){bitrateChart.data.labels.shift();bitrateChart.data.datasets[0].data.shift()}bitrateChart.update('none')}
+
+socket.on('status_change',d=>setRunning(d.status==='running'));
+socket.on('hdmi_status',d=>updateHdmiStatus(d.hdmi_status));
+socket.on('log',e=>appendLog(e));
+socket.on('stats',d=>{
+  if(d.bitrate!==undefined){const br=Math.round(d.bitrate);el('statBitrate').textContent=br>0?br.toLocaleString():'—';el('statBitrate').className='stat-val'+(br>8000?' warn':'');pushBr(br)}
+  if(d.rtt!==undefined){const r=Math.round(d.rtt);el('statRtt').textContent=r>0?r:'—';el('statRtt').className='stat-val'+(r>200?' warn':'')+(r>500?' bad':'')}
+  if(d.packets_lost!==undefined){const l=d.packets_lost;el('statLost').textContent=l>=0?l:'—';el('statLost').className='stat-val'+(l>0?' warn':'')+(l>10?' bad':'')}
+  if(d.bytes_received!==undefined)el('statBytes').textContent=d.bytes_received>0?(d.bytes_received/1048576).toFixed(1):'—';
+  if(d.uptime&&!startedAt)startedAt=Date.now()-d.uptime*1000;
+});
+
+function setRunning(r){
+  isRunning=r;const s=r?'running':'idle';
+  el('statusPill').className=`pill ${s}`;el('statusDot').className=`dot${r?' pulse':''}`;el('statusText').textContent=s.toUpperCase();
+  el('btnStart').disabled=r;el('btnStop').disabled=!r;
+  document.querySelectorAll('.field input,.field select,.mode-btn').forEach(e=>e.disabled=r);
+  el('hdmiToggle').disabled=r;el('liveBadge').className=`video-badge${r?' visible':''}`;
+  el('btnHdmiOn').disabled=!r;el('btnHdmiOff').disabled=!r;
+  if(r){startedAt=startedAt||Date.now();if(!uptimeInterval)uptimeInterval=setInterval(tickUptime,1000);setTimeout(initHls,3500)}
+  else{clearInterval(uptimeInterval);uptimeInterval=null;startedAt=null;el('uptimeDisplay').textContent='00:00:00';destroyHls();el('videoOverlay').className='video-overlay';el('srtUrlText').textContent='Not running';el('srtUrlText').style.color='var(--mut)';updateHdmiStatus('off')}
+}
+
+function updateHdmiStatus(s){el('hdmiStatusBadge').className=`hdmi-status-badge ${s}`;el('hdmiDot').className=`dot${s==='active'?' pulse':''}`;el('hdmiStatusText').textContent=s.toUpperCase();el('hdmiBadge').className=`hdmi-badge${s==='active'?' visible':''}`}
+function tickUptime(){if(!startedAt)return;const s=Math.floor((Date.now()-startedAt)/1000);el('uptimeDisplay').textContent=`${String(Math.floor(s/3600)).padStart(2,'0')}:${String(Math.floor((s%3600)/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`}
+
+function initHls(){const video=el('videoEl');const src=`${location.origin}/hls/stream.m3u8`;destroyHls();if(Hls.isSupported()){hlsInstance=new Hls({lowLatencyMode:true,maxBufferLength:8});hlsInstance.loadSource(src);hlsInstance.attachMedia(video);hlsInstance.on(Hls.Events.MANIFEST_PARSED,()=>{video.play().catch(()=>{});el('videoOverlay').className='video-overlay hidden'});hlsInstance.on(Hls.Events.ERROR,(e,d)=>{if(d.fatal)appendLog({time:new Date().toLocaleTimeString(),level:'warn',msg:`HLS: ${d.type}`})})}else if(video.canPlayType('application/vnd.apple.mpegurl')){video.src=src;video.play().catch(()=>{});el('videoOverlay').className='video-overlay hidden'}}
+function destroyHls(){if(hlsInstance){hlsInstance.destroy();hlsInstance=null}const v=el('videoEl');v.pause();v.src=''}
+
+function setMode(m){if(isRunning)return;currentMode=m;el('btnListener').className=`mode-btn${m==='listener'?' active':''}`;el('btnCaller').className=`mode-btn${m==='caller'?' active':''}`;el('hostField').style.opacity=m==='caller'?'1':'.4';el('modeDesc').textContent=m==='listener'?'Waits for incoming SRT connection.':'Connects to a remote SRT source.'}
+function updateLatency(v){el('latencyVal').textContent=`${v} ms`;const r=el('inpLatency');r.style.setProperty('--val',((v-r.min)/(r.max-r.min)*100)+'%')}
+function toggleHdmi(c){hdmiEnabled=c}
+
+async function startStream(){
+  const cfg={mode:currentMode,host:el('inpHost').value.trim(),port:parseInt(el('inpPort').value),latency:parseInt(el('inpLatency').value),passphrase:el('inpPassphrase').value,hdmi_output:hdmiEnabled,hdmi_player:el('hdmiPlayer').value};
+  await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});
+  const d=await fetch('/api/start',{method:'POST'}).then(r=>r.json());
+  if(d.srt_url){el('srtUrlText').textContent=d.srt_url;el('srtUrlText').style.color='var(--acc)'}
+  if(d.error)appendLog({time:new Date().toLocaleTimeString(),level:'error',msg:d.error})
+}
+async function stopStream(){await fetch('/api/stop',{method:'POST'})}
+async function hdmiStart(){const d=await fetch('/api/hdmi/start',{method:'POST'}).then(r=>r.json());if(!d.ok)appendLog({time:new Date().toLocaleTimeString(),level:'error',msg:'HDMI start failed'})}
+async function hdmiStop(){await fetch('/api/hdmi/stop',{method:'POST'})}
+function copySrtUrl(){const t=el('srtUrlText').textContent;if(t==='Not running')return;navigator.clipboard.writeText(t).then(()=>{document.querySelector('.copy-hint').textContent='✓ copied';setTimeout(()=>document.querySelector('.copy-hint').textContent='copy',1600)})}
+function appendLog(e){const w=el('logWrap');const d=document.createElement('div');d.className='log-line';d.innerHTML=`<span class="log-time">${e.time}</span><span class="log-level ${e.level}">[${e.level.toUpperCase()}]</span><span class="log-msg">${e.msg}</span>`;w.appendChild(d);w.scrollTop=w.scrollHeight}
+function clearLog(){el('logWrap').innerHTML=''}
+
+(async()=>{
+  const d=await fetch('/api/status').then(r=>r.json());
+  currentMode=d.mode||'listener';setMode(currentMode);updateLatency(d.latency||200);
+  el('inpLatency').value=d.latency||200;el('inpPort').value=d.port||1935;el('inpHost').value=d.host||'192.168.1.100';
+  el('hdmiToggle').checked=d.hdmi_output||false;hdmiEnabled=d.hdmi_output||false;
+  if(d.hdmi_player)el('hdmiPlayer').value=d.hdmi_player;
+  setRunning(d.status==='running');updateHdmiStatus(d.hdmi_status||'off');
+  if(d.srt_url){el('srtUrlText').textContent=d.srt_url;el('srtUrlText').style.color='var(--acc)'}
+  if(d.status==='running')startedAt=Date.now()-(d.uptime||0)*1000;
+  (d.log||[]).forEach(appendLog);
+})();
+</script>
+</body>
+</html>
