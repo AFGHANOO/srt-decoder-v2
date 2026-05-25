@@ -161,3 +161,7 @@ sudo apt-get install ffmpeg libsrt-dev srt-tools
 **Passphrase mismatch?**
 - Both sender and receiver must use identical passphrase
 - Minimum 10 characters, maximum 79 characters
+
+---
+
+Designed By M Jafari for Live streaming Community 
